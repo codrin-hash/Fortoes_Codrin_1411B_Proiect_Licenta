@@ -1,0 +1,11 @@
+services:
+  openvas-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ov1-service
+    env_file:
+      - .env
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
