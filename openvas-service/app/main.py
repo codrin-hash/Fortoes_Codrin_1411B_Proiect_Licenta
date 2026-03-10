@@ -20,6 +20,7 @@ from app.models import (
     ScanRequest,
     ScanCreateResponse,
     ScanStatusResponse,
+    ScanResultResponse
 )
 from app.storage import (
     create_scan_record,
@@ -27,6 +28,7 @@ from app.storage import (
     update_scan_status,
 )
 from app.openvas_client import OpenVASClient
+from app.result_mapper import build_mock_result
 
 
 app = FastAPI(title="OV1 OpenVAS Integration Service")
@@ -114,4 +116,29 @@ def get_scan_status(scan_id: str):
         task_id=record.task_id,
         status=status_info["status"],
         progress=status_info["progress"],
+    )
+
+@app.get(
+    "/scans/{scan_id}/result",
+    response_model=ScanResultResponse,
+    dependencies=[Depends(require_token)],
+)
+def get_scan_result(scan_id: str):
+    record = get_scan_record(scan_id)
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    result = build_mock_result(
+        scan_id=record.scan_id,
+        asset_id=record.asset_id,
+        hostname=record.hostname,
+        ip_address=record.ip_address,
+    )
+
+    return ScanResultResponse(
+        scan_id=record.scan_id,
+        report_id=record.report_id or "mock-report",
+        status="ready",
+        content=result,
     )
