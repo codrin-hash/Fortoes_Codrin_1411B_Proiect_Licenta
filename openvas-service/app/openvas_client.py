@@ -9,63 +9,55 @@ The client is responsible for creating scan targets, creating scan tasks,
 starting scans, retrieving task status, and downloading scan reports.
 """
 
-from gvm.connections import TLSConnection
-from gvm.protocols.gmp import Gmp
-from gvm.transforms import EtreeTransform
+from gvm.connections import UnixSocketConnection
+from gvm.protocols.gmp import GMP
+from gvm.transforms import EtreeCheckCommandTransform
 
 from app.config import settings
 
 
 class OpenVASClient:
     def __init__(self):
-        self.host = settings.openvas_host
-        self.port = settings.openvas_port
+        self.socket_path = settings.openvas_socket_path
         self.username = settings.openvas_username
         self.password = settings.openvas_password
+        self.transform = EtreeCheckCommandTransform()
 
-    def _connect(self) -> Gmp:
-        connection = TLSConnection(hostname=self.host, port=self.port)
-        gmp = Gmp(connection=connection, transform=EtreeTransform())
-
-        gmp.connect()
-        gmp.authenticate(self.username, self.password)
-
-        return gmp
+    def _get_connection(self) -> UnixSocketConnection:
+        return UnixSocketConnection(path=self.socket_path)
 
     def create_target(self, name: str, host: str) -> str:
-        gmp = self._connect()
+        connection = self._get_connection()
 
-        try:
+        with GMP(connection=connection, transform=self.transform) as gmp:
+            gmp.authenticate(self.username, self.password)
             response = gmp.create_target(name=name, hosts=[host])
             return response.get("id")
-        finally:
-            gmp.disconnect()
 
     def create_task(self, name: str, target_id: str, scan_config_id: str) -> str:
-        gmp = self._connect()
+        connection = self._get_connection()
 
-        try:
+        with GMP(connection=connection, transform=self.transform) as gmp:
+            gmp.authenticate(self.username, self.password)
             response = gmp.create_task(
                 name=name,
                 config_id=scan_config_id,
                 target_id=target_id,
             )
             return response.get("id")
-        finally:
-            gmp.disconnect()
 
     def start_task(self, task_id: str) -> None:
-        gmp = self._connect()
+        connection = self._get_connection()
 
-        try:
+        with GMP(connection=connection, transform=self.transform) as gmp:
+            gmp.authenticate(self.username, self.password)
             gmp.start_task(task_id)
-        finally:
-            gmp.disconnect()
 
     def get_task_status(self, task_id: str) -> dict:
-        gmp = self._connect()
+        connection = self._get_connection()
 
-        try:
+        with GMP(connection=connection, transform=self.transform) as gmp:
+            gmp.authenticate(self.username, self.password)
             task = gmp.get_task(task_id=task_id)
 
             status = task.findtext(".//task/status")
@@ -79,14 +71,10 @@ class OpenVASClient:
                 "progress": progress,
             }
 
-        finally:
-            gmp.disconnect()
 
     def get_report(self, report_id: str):
-        gmp = self._connect()
+        connection = self._get_connection()
 
-        try:
-            report = gmp.get_report(report_id=report_id, details=True)
-            return report
-        finally:
-            gmp.disconnect()
+        with GMP(connection=connection, transform=self.transform) as gmp:
+            gmp.authenticate(self.username, self.password)
+            return gmp.get_report(report_id=report_id, details=True)

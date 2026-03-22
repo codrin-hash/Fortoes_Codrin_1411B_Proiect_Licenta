@@ -11,6 +11,7 @@ integration service. It allows external systems (such as MrBenny) to:
 The module orchestrates the interaction between the API layer, the
 OpenVAS client, and the internal scan storage.
 """
+import traceback
 
 from fastapi import FastAPI, Depends, HTTPException
 
@@ -87,6 +88,7 @@ def create_scan(request: ScanRequest):
         )
 
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
