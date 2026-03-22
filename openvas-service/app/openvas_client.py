@@ -71,6 +71,7 @@ class OpenVASClient:
                 "progress": progress,
             }
 
+
     def get_report(self, report_id: str):
         connection = self._get_connection()
 
