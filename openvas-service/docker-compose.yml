@@ -9,3 +9,9 @@ services:
     ports:
       - "8081:8081"
     restart: unless-stopped
+    volumes:
+      - greenbone-community-edition_gvmd_socket_vol:/run/gvmd
+
+volumes:
+  greenbone-community-edition_gvmd_socket_vol:
+    external: true
