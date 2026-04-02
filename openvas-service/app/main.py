@@ -8,10 +8,24 @@ integration service. It allows external systems (such as MrBenny) to:
 - check scan status
 - retrieve scan results
 
-The module orchestrates the interaction between the API layer, the
-OpenVAS client, and the internal scan storage.
+The module also runs a background polling task that:
+    1. Periodically checks all active scans for completion
+    2. Downloads the OpenVAS report for completed scans
+    3. Maps the report to MrBenny observations via result_mapper
+    4. Pushes the observations to MrBenny via mr_benny_client
+    5. Stores the returned id_map (mrbenny_device_id) locally
+
+This implements the OV1 specification:
+    - runs independently
+    - sends MAC + IP + detections to MrBenny
+    - receives unique device IDs (mrbenny_device_id) and stores them
+    - has a local transactional send journal
 """
+
+import asyncio
+import logging
 import traceback
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException
 
@@ -25,23 +39,206 @@ from app.models import (
 from app.storage import (
     create_scan_record,
     get_scan_record,
+    get_scans_pending_push,
+    mark_mrbenny_pushed,
     update_scan_status,
+    SCAN_STORE,
 )
 from app.openvas_client import OpenVASClient
+from app import journal as Journal
+from app import mr_benny_client
+from app import result_mapper
 
-
-app = FastAPI(title="OV1 OpenVAS Integration Service")
+logger = logging.getLogger(__name__)
 
 openvas = OpenVASClient()
 
 # default OpenVAS scan profile (Full and Fast)
 DEFAULT_SCAN_CONFIG_ID = "daba56c8-73ec-11df-a475-002264764cea"
 
+# OpenVAS terminal statuses — once a task reaches these, it will not change
+TERMINAL_STATUSES = {"Done", "Stopped", "Interrupted"}
 
-@app.on_event("startup")
-def startup_event():
+
+# ---------------------------------------------------------------------------
+# Background polling task
+# ---------------------------------------------------------------------------
+
+async def _poll_and_push_loop():
+    """
+    Background coroutine that polls OpenVAS for completed scans and
+    pushes results to MrBenny.
+
+    Runs indefinitely at POLL_INTERVAL_SECONDS intervals. Each cycle:
+        1. Finds scans in 'Done' status not yet pushed (get_scans_pending_push)
+        2. Fetches the report from OpenVAS
+        3. Maps the XML report to MrBenny observations
+        4. Calls mr_benny_client.send_ingest — this journals + sends
+        5. Stores the id_map returned by MrBenny
+        6. Also updates any still-running scans with their current status
+    """
+    logger.info(
+        "Background poll-and-push task started (interval=%ds)",
+        settings.poll_interval_seconds,
+    )
+
+    while True:
+        try:
+            await _poll_cycle()
+        except Exception:
+            logger.error(
+                "Unhandled error in poll cycle:\n%s", traceback.format_exc()
+            )
+
+        await asyncio.sleep(settings.poll_interval_seconds)
+
+
+async def _poll_cycle():
+    """Execute one full polling cycle (runs in the asyncio event loop)."""
+
+    # --- Step A: update status for all non-terminal scans ---
+    active_scans = [
+        r for r in SCAN_STORE.values()
+        if r.status not in TERMINAL_STATUSES and not r.mrbenny_pushed
+    ]
+
+    for record in active_scans:
+        try:
+            status_info = await asyncio.to_thread(
+                openvas.get_task_status, record.task_id
+            )
+            new_status = status_info.get("status") or record.status
+            new_progress = status_info.get("progress")
+
+            if new_status != record.status:
+                logger.info(
+                    "poll: scan %s status %s -> %s (progress=%s)",
+                    record.scan_id, record.status, new_status, new_progress,
+                )
+
+            # If the scan just finished, grab the report_id
+            if new_status in TERMINAL_STATUSES and record.report_id is None:
+                report_id = await asyncio.to_thread(
+                    openvas.get_report_id_from_task, record.task_id
+                )
+                update_scan_status(
+                    scan_id=record.scan_id,
+                    status=new_status,
+                    progress=new_progress,
+                    report_id=report_id,
+                )
+            else:
+                update_scan_status(
+                    scan_id=record.scan_id,
+                    status=new_status,
+                    progress=new_progress,
+                )
+
+        except Exception:
+            logger.warning(
+                "poll: failed to update status for scan %s:\n%s",
+                record.scan_id,
+                traceback.format_exc(),
+            )
+
+    # --- Step B: push completed scans to MrBenny ---
+    for record in get_scans_pending_push():
+        if record.report_id is None:
+            try:
+                report_id = await asyncio.to_thread(
+                    openvas.get_report_id_from_task, record.task_id
+                )
+                if report_id:
+                    update_scan_status(
+                        scan_id=record.scan_id,
+                        status=record.status,
+                        progress=record.progress,
+                        report_id=report_id,
+                    )
+                    record.report_id = report_id
+            except Exception:
+                logger.warning(
+                    "poll: could not get report_id for scan %s", record.scan_id
+                )
+                continue
+
+        if record.report_id is None:
+            logger.info("poll: scan %s has no report yet, skipping", record.scan_id)
+            continue
+
+        try:
+            logger.info(
+                "poll: downloading report %s for scan %s",
+                record.report_id, record.scan_id,
+            )
+            report_xml = await asyncio.to_thread(
+                openvas.get_report, record.report_id
+            )
+
+            observations = result_mapper.map_report_to_observations(
+                report_xml=report_xml,
+                scan_id=record.scan_id,
+            )
+
+            if not observations:
+                logger.warning(
+                    "poll: scan %s produced no observations — marking pushed anyway",
+                    record.scan_id,
+                )
+                mark_mrbenny_pushed(record.scan_id, id_map={})
+                continue
+
+            logger.info(
+                "poll: pushing %d observation(s) for scan %s to MrBenny",
+                len(observations), record.scan_id,
+            )
+
+            id_map = await asyncio.to_thread(
+                mr_benny_client.send_ingest,
+                record.scan_id,
+                observations,
+            )
+
+            mark_mrbenny_pushed(record.scan_id, id_map=id_map)
+
+            logger.info(
+                "poll: scan %s pushed to MrBenny; device_ids=%s",
+                record.scan_id, id_map,
+            )
+
+        except Exception:
+            logger.error(
+                "poll: failed to push scan %s to MrBenny:\n%s",
+                record.scan_id,
+                traceback.format_exc(),
+            )
+            # Do NOT mark as pushed — will retry next cycle
+
+
+# ---------------------------------------------------------------------------
+# Application lifespan (startup / shutdown)
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     settings.validate()
+    task = asyncio.create_task(_poll_and_push_loop())
+    logger.info("OV1 service started; background poll task created")
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("OV1 service shutting down")
 
+
+app = FastAPI(title="OV1 OpenVAS Integration Service", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -117,3 +314,58 @@ def get_scan_status(scan_id: str):
         status=status_info["status"],
         progress=status_info["progress"],
     )
+
+
+@app.get(
+    "/scans/{scan_id}/results",
+    dependencies=[Depends(require_token)],
+)
+def get_scan_results(scan_id: str):
+    """
+    Return the current MrBenny push state for a finished scan.
+
+    Includes:
+        - Whether the scan has been pushed to MrBenny
+        - The mrbenny_device_ids (id_map) received from MrBenny
+        - The report_id from OpenVAS
+    """
+    record = get_scan_record(scan_id)
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    return {
+        "scan_id": record.scan_id,
+        "status": record.status,
+        "report_id": record.report_id,
+        "mrbenny_pushed": record.mrbenny_pushed,
+        "mrbenny_device_ids": record.mrbenny_device_ids,
+    }
+
+
+@app.get("/journal", dependencies=[Depends(require_token)])
+def get_journal():
+    """
+    Return all local journal entries.
+
+    Useful for debugging delivery state: which events were sent,
+    which are pending retry, which failed permanently.
+    """
+    entries = Journal.get_all_entries()
+    return {
+        "total": len(entries),
+        "entries": [
+            {
+                "journal_id": e.journal_id,
+                "client_event_id": e.client_event_id,
+                "scan_id": e.scan_id,
+                "status": e.status,
+                "created_at": e.created_at,
+                "sent_at": e.sent_at,
+                "server_event_id": e.server_event_id,
+                "attempt_count": e.attempt_count,
+                "last_error": e.last_error,
+            }
+            for e in entries
+        ],
+    }
