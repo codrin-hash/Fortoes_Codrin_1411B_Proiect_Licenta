@@ -24,7 +24,7 @@ class Settings:
         # MrBenny API (Mode A — static key)
         # Base URL example: https://projects.opti.ro/tuiasimrbenny
         self.mrbenny_base_url = os.getenv("MRBENNY_BASE_URL", "")
-        self.mrbenny_api_key = os.getenv("MRBENNY_API_KEY", "tuiasi-dev")
+        self.mrbenny_api_key = os.getenv("MRBENNY_API_KEY")
 
         # How often (seconds) the background task polls OpenVAS for
         # completed scans and pushes results to MrBenny
