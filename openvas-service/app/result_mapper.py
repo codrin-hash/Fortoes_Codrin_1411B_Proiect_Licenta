@@ -1,31 +1,64 @@
-"""
+'''
 OpenVAS result mapper for the OV1 service.
 
-This module transforms raw OpenVAS scan report XML (as an lxml ElementTree)
-into MrBenny ingest observations.
+Transforms raw OpenVAS XML reports into MrBennyObservation objects
+ready to be sent to MrBenny via POST /api/v1/ingest/data.
 
-Each scanned host becomes one MrBennyObservation. Identifiers are extracted
-from the host's IP address, MAC address (if present in asset details), and
-hostname. Detected vulnerabilities are attached as a free-form list that
-MrBenny stores alongside the observation.
+One observation is produced per scanned host, containing identifiers
+(IP, MAC, hostname, openvas_host_id), attributes (OS), and a list of
+vulnerability findings with severity derived from the CVSS score.
 
 The mapper is intentionally stateless: it receives the parsed XML tree and
 returns a list of observations. All side effects (sending, journaling) are
 handled by the caller.
 
-"""
+'''
 
 import logging
 from typing import Optional
 from xml.etree.ElementTree import Element
 
-from app.mr_benny_models import MrBennyIdentifier, MrBennyObservation
+from app.mr_benny_models import (
+    MrBennyFinding,
+    MrBennyIdentifier,
+    MrBennyObservation,
+)
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# CVSS score -> severity class string
+# ---------------------------------------------------------------------------
+
+def _cvss_to_severity(score: float) -> str:
+    '''
+    Convert a numeric CVSS score to a severity class string.
+
+    Uses standard Greenbone / NVD thresholds. Negative or NaN
+    values are not expected but are treated as "log".
+    '''
+    if score >= 9.0:
+        return "critical"
+    elif score >= 7.0:
+        return "high"
+    elif score >= 4.0:
+        return "medium"
+    elif score > 0.0:
+        return "low"
+    else:
+        return "log"
+
+
+# ---------------------------------------------------------------------------
+# XML helper
+# ---------------------------------------------------------------------------
+
 def _extract_text(element: Optional[Element], path: str) -> Optional[str]:
-    """Return stripped text at XPath path, or None if missing/empty."""
+    '''
+    Return the stripped text of an XML sub-element at the given XPath path,
+    or None if the element is missing or has no text content.
+    '''
     if element is None:
         return None
     node = element.find(path)
@@ -34,70 +67,142 @@ def _extract_text(element: Optional[Element], path: str) -> Optional[str]:
     return node.text.strip()
 
 
-def _parse_vulnerabilities(result_elements: list[Element]) -> list[dict]:
-    """
-    Extract vulnerability entries from a list of <result> XML elements.
+# ---------------------------------------------------------------------------
+# Finding parser
+# ---------------------------------------------------------------------------
 
-    Each <result> in the OpenVAS report represents one finding on one host.
-    We extract the fields most relevant for MrBenny / MISP correlation.
-    """
-    vulnerabilities = []
+def _parse_findings(result_elements: list[Element]) -> list[MrBennyFinding]:
+    '''
+    Build a list of MrBennyFinding objects from a pre-filtered list of
+    <result> XML elements belonging to a single host.
+
+    Each <result> represents one vulnerability. The primary code is the
+    first CVE reference found in <nvt><refs>; the NVT OID is used as
+    fallback when no CVE is available. The numeric CVSS score is converted
+    to a severity class string via _cvss_to_severity().
+    '''
+    findings: list[MrBennyFinding] = []
 
     for result in result_elements:
         nvt = result.find("nvt")
         if nvt is None:
+            # Results without <nvt> are not vulnerabilities — skip
             continue
 
-        name = _extract_text(result, "name") or _extract_text(nvt, "name") or "Unknown"
-        oid = nvt.get("oid", "")
-        severity_text = _extract_text(result, "severity")
-        port = _extract_text(result, "port")
-        description = _extract_text(result, "description")
-        threat = _extract_text(result, "threat")
+        # Prefer <result><name>; fall back to <nvt><name>
+        title = (
+            _extract_text(result, "name")
+            or _extract_text(nvt, "name")
+            or "Unknown"
+        )
 
-        # CVE references
+        oid = nvt.get("oid", "")
+
+        # Convert numeric CVSS score to severity class string
+        severity_text = _extract_text(result, "severity")
+        try:
+            cvss_score = float(severity_text) if severity_text else 0.0
+        except ValueError:
+            cvss_score = 0.0
+        severity_class = _cvss_to_severity(cvss_score)
+
+        # Use the first CVE as the primary code; fall back to NVT OID
         cve_refs = [
             ref.get("id", "")
             for ref in nvt.findall("refs/ref")
-            if ref.get("type", "") == "cve"
+            if ref.get("type", "") == "cve" and ref.get("id", "")
         ]
+        code = cve_refs[0] if cve_refs else (oid or "unknown")
 
-        entry = {
-            "name": name,
-            "nvt_oid": oid,
-            "severity": float(severity_text) if severity_text else None,
-            "threat": threat,
-            "port": port,
-            "cve_refs": cve_refs,
-            "description": description,
-        }
+        findings.append(MrBennyFinding(
+            finding_type="vulnerability",
+            code=code,
+            severity=severity_class,
+            title=title,
+            description=_extract_text(result, "description"),
+            port=_extract_text(result, "port"),
+            nvt_oid=oid if oid else None,
+        ))
 
-        # drop None values to keep payload clean
-        entry = {k: v for k, v in entry.items() if v is not None}
-        vulnerabilities.append(entry)
+    return findings
 
-    return vulnerabilities
 
+# ---------------------------------------------------------------------------
+# Host detail extractor
+# ---------------------------------------------------------------------------
+
+def _extract_host_details(host_el: Element) -> dict:
+    '''
+    Parse <detail> and <asset> children of a <host> element to extract
+    additional identifiers (MAC, hostname, fqdn, openvas_host_id),
+    host attributes (OS), and the agent_local_ref string.
+
+    The IP address is intentionally excluded here and added by the caller
+    as it is always the first mandatory identifier.
+    '''
+    extra_identifiers: list[MrBennyIdentifier] = []
+    attributes: dict = {}
+    openvas_host_id: Optional[str] = None
+
+    for detail in host_el.findall("detail"):
+        name = _extract_text(detail, "name")
+        value = _extract_text(detail, "value")
+        if not name or not value:
+            continue
+
+        name_lower = name.lower()
+
+        if name.upper() == "MAC":
+            extra_identifiers.append(MrBennyIdentifier(type="mac", value=value))
+        elif name_lower in ("hostname", "fqdn"):
+            extra_identifiers.append(MrBennyIdentifier(type=name_lower, value=value))
+        elif name_lower in ("best_os_txt", "os"):
+            # OpenVAS stores the OS guess under "best_os_txt"
+            attributes["os"] = value
+        elif name_lower == "traceroute":
+            pass  # Not relevant for MrBenny — skip
+
+    # openvas_host_id lives in <asset asset_id="...">, not in <detail>
+    asset_el = host_el.find("asset")
+    if asset_el is not None:
+        host_asset_id = asset_el.get("asset_id") or asset_el.get("id")
+        if host_asset_id:
+            openvas_host_id = host_asset_id
+            extra_identifiers.append(
+                MrBennyIdentifier(type="openvas_host_id", value=host_asset_id)
+            )
+
+    return {
+        "identifiers": extra_identifiers,
+        "attributes": attributes if attributes else None,
+        # Format matches the reference JSON: "openvas-host-<id>"
+        "agent_local_ref": f"openvas-host-{openvas_host_id}" if openvas_host_id else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def map_report_to_observations(
     report_xml: Element,
     scan_id: str,
 ) -> list[MrBennyObservation]:
-    """
-    Convert a parsed OpenVAS report XML element into a list of
-    MrBennyObservation objects, one per scanned host.
+    '''
+    Convert an OpenVAS report XML element into a list of MrBennyObservation
+    objects, one per scanned host.
 
-    Args:
-        report_xml: The root Element from gmp.get_report(), which is the
-                    <get_reports_response> or the inner <report> element.
-        scan_id:    Internal OV1 scan identifier, used to build stable
-                    observation_ref values.
+    GMP wraps the report in nested <report> tags:
+        <get_reports_response><report><report>
+    This function navigates to the innermost <report> containing the
+    actual <host> and <results/result> elements.
 
-    Returns:
-        A list of MrBennyObservation, possibly empty if no hosts found.
-    """
-    # GMP wraps the actual report inside <get_reports_response><report><report>
-    # Try to find the innermost <report> that contains <host> elements.
+    Two extraction paths:
+        1. Primary  — iterates over <host> elements (normal complete reports)
+        2. Fallback — infers hosts from <result><host> when no <host>
+                      elements exist (partial or minimal reports)
+    '''
+    # Navigate to the innermost <report> with actual scan data
     report = report_xml
     if report.tag == "get_reports_response":
         report = report.find("report")
@@ -112,58 +217,43 @@ def map_report_to_observations(
     host_index = 0
     seen_ips: set[str] = set()
 
-    # Iterate over <host> elements inside the report
+    # --- Primary path: iterate over <host> elements ---
     for host_el in report.findall("host"):
         ip = _extract_text(host_el, "ip")
         if not ip or ip in seen_ips:
             continue
         seen_ips.add(ip)
 
+        # IP is always the first mandatory identifier
         identifiers: list[MrBennyIdentifier] = [
             MrBennyIdentifier(type="ip", value=ip)
         ]
 
-        # MAC address and hostname — present in <detail> children
-        for detail in host_el.findall("detail"):
-            detail_name = _extract_text(detail, "name")
-            detail_value = _extract_text(detail, "value")
-            if not detail_name or not detail_value:
-                continue
-            if detail_name.upper() == "MAC":
-                identifiers.append(
-                    MrBennyIdentifier(type="mac", value=detail_value)
-                )
-            elif detail_name.lower() in ("hostname", "fqdn"):
-                identifiers.append(
-                    MrBennyIdentifier(type=detail_name.lower(), value=detail_value)
-                )
+        host_details = _extract_host_details(host_el)
+        identifiers.extend(host_details["identifiers"])
 
-        # Collect results (vulnerabilities) for this host
+        # Collect all <result> elements for this host IP
         host_results = [
             r for r in report.findall("results/result")
             if _extract_text(r, "host") == ip
         ]
 
-        vulns = _parse_vulnerabilities(host_results)
-
-        severities = [v["severity"] for v in vulns if "severity" in v]
-        scan_summary = {
-            "total_findings": len(vulns),
-            "max_severity": max(severities) if severities else 0.0,
-        }
+        findings = _parse_findings(host_results)
 
         observations.append(MrBennyObservation(
-            observation_ref=f"scan-{scan_id}-host-{host_index}",
+            observation_ref=f"ov-{scan_id}-host-{host_index}",
+            agent_local_ref=host_details["agent_local_ref"],
             identifiers=identifiers,
-            vulnerabilities=vulns if vulns else None,
-            scan_summary=scan_summary,
+            attributes=host_details["attributes"],
+            findings=findings if findings else None,
         ))
         host_index += 1
 
-    # Fallback: if no <host> elements, infer hosts from <results>
+    # --- Fallback path: infer hosts from <results> ---
     if not observations:
         logger.info(
-            "No <host> elements found in report; falling back to results-based extraction"
+            "No <host> elements found in report; "
+            "falling back to results-based host extraction"
         )
         for result_el in report.findall("results/result"):
             ip = _extract_text(result_el, "host")
@@ -171,22 +261,19 @@ def map_report_to_observations(
                 continue
             seen_ips.add(ip)
 
-            identifiers = [MrBennyIdentifier(type="ip", value=ip)]
             host_results = [
                 r for r in report.findall("results/result")
                 if _extract_text(r, "host") == ip
             ]
-            vulns = _parse_vulnerabilities(host_results)
-            severities = [v["severity"] for v in vulns if "severity" in v]
+            findings = _parse_findings(host_results)
 
+            # No <detail> or <asset> data available in fallback mode
             observations.append(MrBennyObservation(
-                observation_ref=f"scan-{scan_id}-host-{host_index}",
-                identifiers=identifiers,
-                vulnerabilities=vulns if vulns else None,
-                scan_summary={
-                    "total_findings": len(vulns),
-                    "max_severity": max(severities) if severities else 0.0,
-                },
+                observation_ref=f"ov-{scan_id}-host-{host_index}",
+                agent_local_ref=None,
+                identifiers=[MrBennyIdentifier(type="ip", value=ip)],
+                attributes=None,
+                findings=findings if findings else None,
             ))
             host_index += 1
 
