@@ -10,6 +10,7 @@ the Mode A authentication (static API key).
 
 References:
     - student_documentation.md, sections 5.5, 7, 8
+    - ov1_ingest_vulnerability_detection.json
 """
 
 from typing import Any, Optional
@@ -22,31 +23,66 @@ from pydantic import BaseModel
 
 class MrBennyIdentifier(BaseModel):
     """
-    A single identifier for a device observation.
-
-    Accepted types (from documentation section 8):
-        mac, ip, ipv6, hostname, fqdn, openvas_host_id, custom
+    # A single identifier for a device observation.
     """
     type: str
     value: str
+
+
+class MrBennyFinding(BaseModel):
+    """
+    A single vulnerability finding attached to an observation.
+
+    Follows the structure from ov1_ingest_vulnerability_detection.json:
+        finding_type : always "vulnerability" for OV1
+        code         : CVE ID if available, otherwise NVT OID
+        severity     : severity class string — "critical", "high", "medium", "low", "log"
+        title        : human-readable vulnerability name
+        description  : detailed description from OpenVAS (optional)
+        port         : port/protocol where the finding was detected (optional)
+        nvt_oid      : OpenVAS NVT OID for cross-reference (optional)
+    """
+    finding_type: str = "vulnerability"
+    code: str
+    severity: str
+    title: str
+    description: Optional[str] = None
+    port: Optional[str] = None
+    nvt_oid: Optional[str] = None
 
 
 class MrBennyObservation(BaseModel):
     """
     One observation within an ingest event.
 
-    Each observation describes one discovered host/device.
-    The 'observation_ref' is a local reference used to correlate
-    the id_map entries in the response back to this observation.
+    Each observation describes one scanned host/device.
 
-    Extra fields (vulnerabilities, scan metadata) are accepted by
-    MrBenny and stored as-is, so we include them here as optional
-    free-form data.
+    Fields:
+        observation_ref  : local reference to correlate id_map entries
+                           in the MrBenny response back to this host
+        agent_local_ref  : internal OpenVAS host reference
+                           (e.g. "openvas-host-<openvas_host_id>")
+        identifiers      : list of identifiers (ip, mac, hostname, etc.)
+        attributes       : free-form host metadata (e.g. {"os": "Windows 11"})
+        findings         : list of vulnerability findings for this host
     """
     observation_ref: str
+    agent_local_ref: Optional[str] = None
     identifiers: list[MrBennyIdentifier]
-    vulnerabilities: Optional[list[dict[str, Any]]] = None
-    scan_summary: Optional[dict[str, Any]] = None
+    attributes: Optional[dict[str, Any]] = None
+    findings: Optional[list[MrBennyFinding]] = None
+
+
+class MrBennySourceContext(BaseModel):
+    """
+    Metadata about the OpenVAS scan that produced this event.
+
+    Follows the structure from ov1_ingest_vulnerability_detection.json:
+        scan_id : internal OV1 scan identifier
+        scanner : scanner name, always "openvas-main" for OV1
+    """
+    scan_id: str
+    scanner: str = "openvas-main"
 
 
 class MrBennyIngestRequest(BaseModel):
@@ -56,12 +92,14 @@ class MrBennyIngestRequest(BaseModel):
     Fields:
         client_event_id : unique per agent install, used for idempotency
         timestamp       : ISO-8601 logical time of the event
-        event_type      : fixed to 'openvas_scan_result' for OV1
+        event_type      : "vulnerability_detection" for OV1
+        source_context  : metadata about the originating OpenVAS scan
         observations    : list of host observations from the scan
     """
     client_event_id: str
     timestamp: str
-    event_type: str = "openvas_scan_result"
+    event_type: str = "vulnerability_detection"
+    source_context: Optional[MrBennySourceContext] = None
     observations: list[MrBennyObservation]
 
 
