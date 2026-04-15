@@ -287,6 +287,10 @@ services:
     image: tleemcjr/metasploitable2
     container_name: metasploitable
     restart: unless-stopped
+    privileged: true
+    tty: true
+    networks:
+      - default
 
 volumes:
   gpg_data_vol:
