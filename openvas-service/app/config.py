@@ -21,10 +21,23 @@ class Settings:
         self.misp_api_key = os.getenv("MISP_API_KEY")
         self.misp_verify_tls = os.getenv("MISP_VERIFY_TLS", "true").lower() == "true"
 
-        # MrBenny API (Mode A — static key)
-        # Base URL example: https://projects.opti.ro/tuiasimrbenny
+        # MrBenny API base URL
+        # Example: https://projects.opti.ro/tuiasimrbenny
         self.mrbenny_base_url = os.getenv("MRBENNY_BASE_URL", "")
+
+        # Mode A — static dev key (fallback, used only if B1 session is unavailable)
         self.mrbenny_api_key = os.getenv("MRBENNY_API_KEY")
+
+        # Mode B1 — session-based authentication
+        # The install token is generated once by the admin and stored here.
+        # At startup the service exchanges it for a session token via
+        # POST /api/v1/auth/session and uses that token for all ingest calls.
+        self.mrbenny_install_token = os.getenv("MRBENNY_INSTALL_TOKEN")
+        self.mrbenny_hardware_uuid = os.getenv(
+            "MRBENNY_HARDWARE_UUID", "ov1-codrin-licenta-2026"
+        )
+        self.mrbenny_agent_version = os.getenv("MRBENNY_AGENT_VERSION", "0.1.0")
+        self.mrbenny_host_label = os.getenv("MRBENNY_HOST_LABEL", "ov1-service")
 
         # How often (seconds) the background task polls OpenVAS for
         # completed scans and pushes results to MrBenny
@@ -34,13 +47,12 @@ class Settings:
         """
         Validate required settings at startup.
 
-        OpenVAS credentials are mandatory — without them the service
-        cannot do anything useful.
+        OpenVAS credentials are mandatory. MrBenny settings are validated
+        with warnings only — the service can still accept scan requests
+        without them, queuing results until MrBenny is reachable.
 
-        MrBenny settings are warned about but do NOT block startup,
-        so the service can still accept scan requests even if MrBenny
-        is not yet configured (scans will be queued and pushed once
-        MRBENNY_BASE_URL is set and the service is restarted).
+        B1 mode requires MRBENNY_INSTALL_TOKEN. If absent, the service
+        falls back to Mode A using MRBENNY_API_KEY.
         """
         errors = []
 
@@ -58,9 +70,14 @@ class Settings:
             logger.warning(
                 "MRBENNY_BASE_URL is not set — scan results will NOT be pushed to MrBenny"
             )
-        if not self.mrbenny_api_key:
+        if not self.mrbenny_install_token:
             logger.warning(
-                "MRBENNY_API_KEY is not set — MrBenny requests will fail"
+                "MRBENNY_INSTALL_TOKEN is not set — falling back to Mode A (api key)"
+            )
+        if not self.mrbenny_install_token and not self.mrbenny_api_key:
+            logger.warning(
+                "Neither MRBENNY_INSTALL_TOKEN nor MRBENNY_API_KEY is set — "
+                "MrBenny requests will fail"
             )
 
 
