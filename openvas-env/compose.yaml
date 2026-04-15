@@ -283,6 +283,11 @@ services:
       - gvmd
       - ospd-openvas
 
+  metasploitable:
+    image: tleemcjr/metasploitable2
+    container_name: metasploitable
+    restart: unless-stopped
+
 volumes:
   gpg_data_vol:
   scap_data_vol:

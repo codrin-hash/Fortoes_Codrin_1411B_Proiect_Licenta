@@ -2,9 +2,7 @@
 Transactional local journal for the OV1 service.
 
 This module implements the local send journal required by the MrBenny
-agent specification (student_documentation.md, section 12):
-
-    "jurnal local pentru replay"
+agent specification
 
 Every ingest event that OV1 attempts to send to MrBenny is first written
 to the journal with status 'pending'. Once MrBenny confirms the event
@@ -81,9 +79,6 @@ def add_entry(
 ) -> JournalEntry:
     """
     Create a new journal entry in 'pending' state.
-
-    Call this BEFORE making the HTTP request to MrBenny so the event
-    is recorded even if the process crashes mid-flight.
     """
     entry = JournalEntry(
         journal_id=str(uuid.uuid4()),
