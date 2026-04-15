@@ -29,6 +29,7 @@ from app.mr_benny_models import (
     MrBennyIngestRequest,
     MrBennyIngestResponse,
     MrBennyObservation,
+    MrBennySourceContext,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ def send_ingest(
     payload = MrBennyIngestRequest(
         client_event_id=client_event_id,
         timestamp=timestamp,
+        source_context=MrBennySourceContext(scan_id=scan_id),
         observations=observations,
     )
 
@@ -213,3 +215,112 @@ def send_ingest(
             retryable=True,
         )
         return {}
+
+
+def retry_pending_journal_entries() -> None:
+    """
+    Retry all journal entries still in 'pending' state.
+
+    Called by the background polling task each cycle, after the main
+    push logic. For each pending entry, re-sends the original payload
+    to MrBenny using the same client_event_id — MrBenny's idempotency
+    guarantees that duplicate deliveries are safe.
+
+    Entries are retried using their stored payload_json so the content
+    is identical to the original attempt. If MrBenny returns 409
+    (idempotent replay), the entry is marked 'replayed' — not an error.
+    """
+    pending = Journal.get_pending_entries()
+    if not pending:
+        return
+
+    logger.info("retry: %d pending journal entry/entries to retry", len(pending))
+
+    url = f"{settings.mrbenny_base_url.rstrip('/')}/api/v1/ingest/data"
+    headers = _build_headers()
+
+    for entry in pending:
+        logger.info(
+            "retry: retrying journal_id=%s scan=%s attempt=%d",
+            entry.journal_id,
+            entry.scan_id,
+            entry.attempt_count + 1,
+        )
+
+        try:
+            with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
+                http_response = client.post(
+                    url, content=entry.payload_json, headers=headers
+                )
+
+            raw = http_response.text
+
+            if http_response.status_code == 409:
+                logger.info(
+                    "retry: 409 for journal_id=%s — treating as replay",
+                    entry.journal_id,
+                )
+                Journal.mark_sent(
+                    entry.journal_id,
+                    server_event_id="replay-conflict",
+                    idempotent_replay=True,
+                )
+                continue
+
+            if http_response.status_code == 429:
+                logger.warning(
+                    "retry: rate limited (429) for journal_id=%s — will retry later",
+                    entry.journal_id,
+                )
+                Journal.mark_failed(
+                    entry.journal_id, error="429 rate limited", retryable=True
+                )
+                continue
+
+            if http_response.status_code >= 500:
+                Journal.mark_failed(
+                    entry.journal_id,
+                    error=f"HTTP {http_response.status_code}: {raw[:200]}",
+                    retryable=True,
+                )
+                continue
+
+            response_data = MrBennyIngestResponse.model_validate_json(raw)
+
+            if not response_data.ok:
+                retryable = response_data.retryable or False
+                error_msg = f"{response_data.error_code}: {response_data.message}"
+                Journal.mark_failed(
+                    entry.journal_id, error=error_msg, retryable=retryable
+                )
+                logger.warning(
+                    "retry: journal_id=%s error from MrBenny (retryable=%s): %s",
+                    entry.journal_id,
+                    retryable,
+                    error_msg,
+                )
+                continue
+
+            server_event_id = (
+                response_data.data.server_event_id if response_data.data else "unknown"
+            )
+            Journal.mark_sent(
+                entry.journal_id,
+                server_event_id=server_event_id,
+                idempotent_replay=response_data.idempotent_replay,
+            )
+            logger.info(
+                "retry: journal_id=%s delivered OK server_event_id=%s",
+                entry.journal_id,
+                server_event_id,
+            )
+
+        except httpx.RequestError as exc:
+            logger.error(
+                "retry: HTTP error for journal_id=%s: %s", entry.journal_id, exc
+            )
+            Journal.mark_failed(
+                entry.journal_id,
+                error=f"HTTP request error: {exc}",
+                retryable=True,
+            )

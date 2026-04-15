@@ -212,7 +212,10 @@ async def _poll_cycle():
                 record.scan_id,
                 traceback.format_exc(),
             )
-            # Do NOT mark as pushed — will retry next cycle
+
+
+    # --- Step C: retry pending journal entries ---
+    await asyncio.to_thread(mr_benny_client.retry_pending_journal_entries)
 
 
 # ---------------------------------------------------------------------------
