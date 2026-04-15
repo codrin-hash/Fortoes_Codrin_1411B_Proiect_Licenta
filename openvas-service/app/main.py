@@ -48,6 +48,7 @@ from app.openvas_client import OpenVASClient
 from app import journal as Journal
 from app import mr_benny_client
 from app import result_mapper
+from app import session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ async def _poll_cycle():
                 record.scan_id,
                 traceback.format_exc(),
             )
-
+            # Do NOT mark as pushed — will retry next cycle
 
     # --- Step C: retry pending journal entries ---
     await asyncio.to_thread(mr_benny_client.retry_pending_journal_entries)
@@ -225,6 +226,7 @@ async def _poll_cycle():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.validate()
+    await asyncio.to_thread(session_manager.open_session)
     task = asyncio.create_task(_poll_and_push_loop())
     logger.info("OV1 service started; background poll task created")
     yield
