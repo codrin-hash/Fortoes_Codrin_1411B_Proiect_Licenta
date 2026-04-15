@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app import journal as Journal
+from app import session_manager
 from app.config import settings
 from app.mr_benny_models import (
     MrBennyIngestRequest,
@@ -40,12 +41,23 @@ _REQUEST_TIMEOUT = 15.0
 
 def _build_headers() -> dict[str, str]:
     """
-    Build Mode A authentication headers.
+    Build authentication headers for MrBenny requests.
 
-    Per documentation section 2.2:
-        X-Mrbenny-Mode: A
-        X-API-Key: <dev_key>
+    Prefers Mode B1 (session token) when a session is active.
+    Falls back to Mode A (static API key) when no session is open,
+    which happens if MRBENNY_INSTALL_TOKEN is not configured or the
+    session open failed at startup.
     """
+    session_token = session_manager.get_session_token()
+
+    if session_token:
+        return {
+            "X-Mrbenny-Mode": "B1",
+            "Authorization": f"Bearer {session_token}",
+            "Content-Type": "application/json",
+        }
+
+    # Mode A fallback
     return {
         "X-Mrbenny-Mode": "A",
         "X-API-Key": settings.mrbenny_api_key,
@@ -139,12 +151,28 @@ def send_ingest(
             raw[:500],
         )
 
-        if http_response.status_code == 409:
-            # Idempotency conflict — MrBenny already has this event
-            logger.info(
-                "send_ingest: 409 conflict for client_event_id=%s — treating as replay",
-                client_event_id,
+        if http_response.status_code in (401, 403):
+            # Session token expired or revoked — attempt to renew and retry once
+            logger.warning(
+                "send_ingest: HTTP %d — session may have expired, attempting renewal",
+                http_response.status_code,
             )
+            session_manager.clear_session()
+            renewed = session_manager.open_session()
+            if renewed:
+                headers = _build_headers()
+                with httpx.Client(timeout=_REQUEST_TIMEOUT) as client:
+                    http_response = client.post(url, content=payload_json, headers=headers)
+                raw = http_response.text
+            else:
+                Journal.mark_failed(
+                    journal_entry.journal_id,
+                    error=f"HTTP {http_response.status_code}: session renewal failed",
+                    retryable=True,
+                )
+                return {}
+
+        if http_response.status_code == 409:
             Journal.mark_sent(
                 journal_entry.journal_id,
                 server_event_id="replay-conflict",
