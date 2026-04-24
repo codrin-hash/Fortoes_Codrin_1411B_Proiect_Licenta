@@ -18,7 +18,7 @@ import logging
 from typing import Optional
 from xml.etree.ElementTree import Element
 
-from app.mr_benny_models import (
+from app.models.mr_benny_models import (
     MrBennyFinding,
     MrBennyIdentifier,
     MrBennyObservation,

@@ -36,7 +36,7 @@ from app.models import (
     ScanCreateResponse,
     ScanStatusResponse,
 )
-from app.storage import (
+from app.core.storage import (
     create_scan_record,
     get_scan_record,
     get_scans_pending_push,
@@ -44,10 +44,9 @@ from app.storage import (
     update_scan_status,
     SCAN_STORE,
 )
-from app.openvas_client import OpenVASClient
-from app import journal as Journal
-from app import mr_benny_client
-from app import result_mapper
+from app.clients.openvas_client import OpenVASClient
+from app.clients import mr_benny_client
+from app.core import result_mapper
 from app import session_manager
 
 logger = logging.getLogger(__name__)
@@ -356,7 +355,7 @@ def get_journal():
     Useful for debugging delivery state: which events were sent,
     which are pending retry, which failed permanently.
     """
-    entries = Journal.get_all_entries()
+    entries = journal.get_all_entries()
     return {
         "total": len(entries),
         "entries": [
