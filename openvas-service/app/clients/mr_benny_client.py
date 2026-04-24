@@ -23,10 +23,9 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app import journal as Journal
 from app import session_manager
 from app.config import settings
-from app.mr_benny_models import (
+from app.models.mr_benny_models import (
     MrBennyIngestRequest,
     MrBennyIngestResponse,
     MrBennyObservation,
@@ -124,7 +123,7 @@ def send_ingest(
     payload_json = payload.model_dump_json()
 
     # --- Step 1: write to journal BEFORE sending ---
-    journal_entry = Journal.add_entry(
+    journal_entry = journal.add_entry(
         client_event_id=client_event_id,
         scan_id=scan_id,
         payload_json=payload_json,
@@ -165,7 +164,7 @@ def send_ingest(
                     http_response = client.post(url, content=payload_json, headers=headers)
                 raw = http_response.text
             else:
-                Journal.mark_failed(
+                journal.mark_failed(
                     journal_entry.journal_id,
                     error=f"HTTP {http_response.status_code}: session renewal failed",
                     retryable=True,
@@ -173,7 +172,7 @@ def send_ingest(
                 return {}
 
         if http_response.status_code == 409:
-            Journal.mark_sent(
+            journal.mark_sent(
                 journal_entry.journal_id,
                 server_event_id="replay-conflict",
                 idempotent_replay=True,
@@ -182,7 +181,7 @@ def send_ingest(
 
         if http_response.status_code == 429:
             logger.warning("send_ingest: rate limited (429) — will retry later")
-            Journal.mark_failed(
+            journal.mark_failed(
                 journal_entry.journal_id,
                 error="429 rate limited",
                 retryable=True,
@@ -190,7 +189,7 @@ def send_ingest(
             return {}
 
         if http_response.status_code >= 500:
-            Journal.mark_failed(
+            journal.mark_failed(
                 journal_entry.journal_id,
                 error=f"HTTP {http_response.status_code}: {raw[:200]}",
                 retryable=True,
@@ -203,7 +202,7 @@ def send_ingest(
         if not response_data.ok:
             retryable = response_data.retryable or False
             error_msg = f"{response_data.error_code}: {response_data.message}"
-            Journal.mark_failed(
+            journal.mark_failed(
                 journal_entry.journal_id,
                 error=error_msg,
                 retryable=retryable,
@@ -217,7 +216,7 @@ def send_ingest(
         server_event_id = (
             response_data.data.server_event_id if response_data.data else "unknown"
         )
-        Journal.mark_sent(
+        journal.mark_sent(
             journal_entry.journal_id,
             server_event_id=server_event_id,
             idempotent_replay=response_data.idempotent_replay,
@@ -237,7 +236,7 @@ def send_ingest(
     except httpx.RequestError as exc:
         error_msg = f"HTTP request error: {exc}"
         logger.error("send_ingest: %s", error_msg)
-        Journal.mark_failed(
+        journal.mark_failed(
             journal_entry.journal_id,
             error=error_msg,
             retryable=True,
@@ -258,7 +257,7 @@ def retry_pending_journal_entries() -> None:
     is identical to the original attempt. If MrBenny returns 409
     (idempotent replay), the entry is marked 'replayed' — not an error.
     """
-    pending = Journal.get_pending_entries()
+    pending = journal.get_pending_entries()
     if not pending:
         return
 
@@ -288,7 +287,7 @@ def retry_pending_journal_entries() -> None:
                     "retry: 409 for journal_id=%s — treating as replay",
                     entry.journal_id,
                 )
-                Journal.mark_sent(
+                journal.mark_sent(
                     entry.journal_id,
                     server_event_id="replay-conflict",
                     idempotent_replay=True,
@@ -300,13 +299,13 @@ def retry_pending_journal_entries() -> None:
                     "retry: rate limited (429) for journal_id=%s — will retry later",
                     entry.journal_id,
                 )
-                Journal.mark_failed(
+                journal.mark_failed(
                     entry.journal_id, error="429 rate limited", retryable=True
                 )
                 continue
 
             if http_response.status_code >= 500:
-                Journal.mark_failed(
+                journal.mark_failed(
                     entry.journal_id,
                     error=f"HTTP {http_response.status_code}: {raw[:200]}",
                     retryable=True,
@@ -318,7 +317,7 @@ def retry_pending_journal_entries() -> None:
             if not response_data.ok:
                 retryable = response_data.retryable or False
                 error_msg = f"{response_data.error_code}: {response_data.message}"
-                Journal.mark_failed(
+                journal.mark_failed(
                     entry.journal_id, error=error_msg, retryable=retryable
                 )
                 logger.warning(
@@ -332,7 +331,7 @@ def retry_pending_journal_entries() -> None:
             server_event_id = (
                 response_data.data.server_event_id if response_data.data else "unknown"
             )
-            Journal.mark_sent(
+            journal.mark_sent(
                 entry.journal_id,
                 server_event_id=server_event_id,
                 idempotent_replay=response_data.idempotent_replay,
@@ -347,7 +346,7 @@ def retry_pending_journal_entries() -> None:
             logger.error(
                 "retry: HTTP error for journal_id=%s: %s", entry.journal_id, exc
             )
-            Journal.mark_failed(
+            journal.mark_failed(
                 entry.journal_id,
                 error=f"HTTP request error: {exc}",
                 retryable=True,
