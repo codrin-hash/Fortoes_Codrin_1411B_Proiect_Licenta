@@ -37,7 +37,6 @@ pipeline {
          * Keeps the last 10 runs and no more than 30 days of history.
          */
         buildDiscarder(logRotator(numToKeepStr: '10', daysToKeepStr: '30'))
-        timestamps()
         timeout(time: 30, unit: 'MINUTES')
     }
 
