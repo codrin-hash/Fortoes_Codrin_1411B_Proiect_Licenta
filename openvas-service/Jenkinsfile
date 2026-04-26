@@ -14,6 +14,11 @@
 pipeline {
 
     agent any
+
+    /*
+     * All file operations execute relative to the openvas-service directory,
+     * which is where the Dockerfile and requirements.txt live.
+     */
     environment {
         SERVICE_DIR = 'openvas-service'
         REGISTRY    = 'registry.example.com'
@@ -31,15 +36,15 @@ pipeline {
 
         stage('Test') {
             /*
-             * Runs inside python:3.12-slim so pytest and all dependencies
-             * are available without requiring Python on the Jenkins host.
-             * reuseNode keeps the checked-out workspace accessible inside
-             * the container without an extra volume mount.
+             * Runs inside python:3.12-slim as root so pip can write to its
+             * cache directories. reuseNode keeps the checked-out workspace
+             * accessible inside the container without an extra volume mount.
              */
             agent {
                 docker {
                     image 'python:3.12-slim'
                     reuseNode true
+                    args '-u root'
                 }
             }
             steps {
@@ -55,7 +60,8 @@ pipeline {
             }
             post {
                 always {
-                    junit "${SERVICE_DIR}/test-results.xml"
+                    junit allowEmptyResults: true,
+                          testResults: "${SERVICE_DIR}/test-results.xml"
                 }
             }
         }
