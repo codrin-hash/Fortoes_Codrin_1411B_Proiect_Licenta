@@ -1,35 +1,22 @@
 /*
  * CI pipeline for the OV1 OpenVAS integration service.
  *
- * Stages:
- *   1. Test        — run the unit test suite inside a python:3.12-slim container;
- *                    no live OpenVAS socket or MrBenny instance is required
- *   2. Build Image — build the Docker image and tag it with the short commit SHA
- *   3. Push Image  — push to the registry (runs only on the main branch)
- *
- * Required Jenkins credentials:
- *   REGISTRY_CREDENTIALS_ID — Docker Hub / private registry username + password
+ * Triggered automatically on every commit via a GitHub webhook.
+ * Runs the full unit test suite inside a python:3.12-slim container —
+ * no live OpenVAS socket or MrBenny instance is required.
  */
 
 pipeline {
 
     agent any
 
-    /*
-     * All file operations execute relative to the openvas-service directory,
-     * which is where the Dockerfile and requirements.txt live.
-     */
     environment {
         SERVICE_DIR = 'openvas-service'
-        REGISTRY    = 'registry.example.com'
-        IMAGE_NAME  = 'ov1-service'
-        IMAGE_TAG   = "${env.GIT_COMMIT?.take(7) ?: 'latest'}"
-        FULL_IMAGE  = "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
     }
 
     options {
         buildDiscarder(logRotator(numToKeepStr: '10', daysToKeepStr: '30'))
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 15, unit: 'MINUTES')
     }
 
     stages {
@@ -37,8 +24,8 @@ pipeline {
         stage('Test') {
             /*
              * Runs inside python:3.12-slim as root so pip can write to its
-             * cache directories. reuseNode keeps the checked-out workspace
-             * accessible inside the container without an extra volume mount.
+             * cache directories without permission errors. reuseNode keeps
+             * the checked-out workspace accessible inside the container.
              */
             agent {
                 docker {
@@ -66,38 +53,6 @@ pipeline {
                 }
             }
         }
-
-        stage('Build Image') {
-            steps {
-                dir("${SERVICE_DIR}") {
-                    sh "docker build -t ${FULL_IMAGE} ."
-                }
-            }
-        }
-
-        stage('Push Image') {
-            /*
-             * Image publication is restricted to the main branch so that
-             * feature branches validate the build without affecting the registry.
-             */
-            when {
-                branch 'main'
-            }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'REGISTRY_CREDENTIALS_ID',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
-                    sh '''
-                        echo "$DOCKER_PASS" | docker login ${REGISTRY} \
-                            -u "$DOCKER_USER" --password-stdin
-                        docker push ${FULL_IMAGE}
-                        docker logout ${REGISTRY}
-                    '''
-                }
-            }
-        }
     }
 
     post {
@@ -105,10 +60,10 @@ pipeline {
             cleanWs()
         }
         success {
-            echo "Pipeline completed successfully — image: ${FULL_IMAGE}"
+            echo "All tests passed."
         }
         failure {
-            echo "Pipeline failed. Check the test report and build log above."
+            echo "Tests failed. Check the report above."
         }
     }
 }
