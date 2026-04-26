@@ -51,6 +51,7 @@ pipeline {
                 dir("${SERVICE_DIR}") {
                     sh '''
                         pip install --quiet -r requirements.txt
+                        export PYTHONPATH=$(pwd)
                         pytest app/tests/ \
                             --tb=short \
                             --junitxml=test-results.xml \
