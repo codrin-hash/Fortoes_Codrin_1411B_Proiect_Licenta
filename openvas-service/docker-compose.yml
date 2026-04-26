@@ -1,4 +1,5 @@
 services:
+
   openvas-service:
     build:
       context: .
@@ -12,6 +13,21 @@ services:
     volumes:
       - greenbone-community-edition_gvmd_socket_vol:/run/gvmd
 
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: ov1-jenkins
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+
 volumes:
   greenbone-community-edition_gvmd_socket_vol:
     external: true
+  jenkins_home:
+    driver: local
