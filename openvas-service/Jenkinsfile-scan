@@ -204,7 +204,7 @@ pipeline {
                         def results = sh(
                             script: """
                                 curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID}/results \\
-                                    -H 'Authorization: Bearer ${API_TOKEN}'
+                                    -H "Authorization: Bearer ${API_TOKEN}"
                             """,
                             returnStdout: true
                         ).trim()
