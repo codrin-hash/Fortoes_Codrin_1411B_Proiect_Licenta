@@ -1,0 +1,231 @@
+/*
+ * Parametric scan job for the OV1 OpenVAS integration service.
+ *
+ * This job triggers a vulnerability scan through the OV1 FastAPI service,
+ * polls until the scan reaches a terminal state, then prints the MrBenny
+ * delivery result. It does not replace the CI pipeline (Jenkinsfile) —
+ * it runs alongside it as a separate, on-demand job.
+ *
+ * Parameters (filled in the Jenkins "Build with Parameters" form):
+ *   TARGET_IP    — IP address of the host to scan  (e.g. 172.18.0.5)
+ *   TARGET_HOST  — Hostname label                  (e.g. metasploitable2)
+ *   ASSET_ID     — Unique asset identifier          (e.g. asset-msf-01)
+ *
+ * Required Jenkins credential:
+ *   OV1_API_TOKEN — Secret text containing the SERVICE_API_TOKEN value
+ *                   configured in the OV1 service .env file.
+ *
+ * Network assumption:
+ *   Jenkins and ov1-service share the same Docker Compose network, so the
+ *   service is reachable at http://ov1-service:8081 from inside the container.
+ */
+
+pipeline {
+
+    agent any
+
+    parameters {
+        string(
+            name: 'TARGET_IP',
+            defaultValue: '',
+            description: 'IP address of the host to scan (e.g. 172.18.0.5)'
+        )
+        string(
+            name: 'TARGET_HOST',
+            defaultValue: '',
+            description: 'Hostname label used in OpenVAS target name'
+        )
+        string(
+            name: 'ASSET_ID',
+            defaultValue: '',
+            description: 'Unique asset identifier forwarded to MrBenny (e.g. asset-msf-01)'
+        )
+    }
+
+    environment {
+        OV1_BASE_URL = 'http://ov1-service:8081'
+        /*
+         * Maximum time (seconds) to wait for a scan to finish before the
+         * job is aborted. Full OpenVAS scans can take tens of minutes.
+         */
+        SCAN_TIMEOUT_SECONDS = '3600'
+        POLL_INTERVAL_SECONDS = '30'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 90, unit: 'MINUTES')
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+            /*
+             * Fail fast if any required parameter is missing, before any
+             * network call is made against the OV1 service.
+             */
+            steps {
+                script {
+                    if (!params.TARGET_IP?.trim()) {
+                        error('TARGET_IP is required')
+                    }
+                    if (!params.TARGET_HOST?.trim()) {
+                        error('TARGET_HOST is required')
+                    }
+                    if (!params.ASSET_ID?.trim()) {
+                        error('ASSET_ID is required')
+                    }
+                    echo "Target: ${params.TARGET_HOST} (${params.TARGET_IP}), asset_id: ${params.ASSET_ID}"
+                }
+            }
+        }
+
+        stage('Start Scan') {
+            /*
+             * POST /scans to the OV1 service. The response contains the
+             * scan_id assigned by the service, which is stored in the
+             * environment for use by subsequent stages.
+             */
+            steps {
+                withCredentials([string(
+                    credentialsId: 'OV1_API_TOKEN',
+                    variable: 'API_TOKEN'
+                )]) {
+                    script {
+                        def response = sh(
+                            script: """
+                                curl -sf -X POST ${OV1_BASE_URL}/scans \\
+                                    -H 'Authorization: Bearer ${API_TOKEN}' \\
+                                    -H 'Content-Type: application/json' \\
+                                    -d '{
+                                        "asset_id":   "${params.ASSET_ID}",
+                                        "ip_address": "${params.TARGET_IP}",
+                                        "hostname":   "${params.TARGET_HOST}"
+                                    }'
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Start scan response: ${response}"
+
+                        /*
+                         * Parse the scan_id out of the JSON response using
+                         * Python — available on the jenkins:lts-jdk17 image
+                         * only if installed; use grep+sed as a fallback so
+                         * the job does not depend on Python being present.
+                         */
+                        def scanId = sh(
+                            script: "echo '${response}' | grep -o '\"scan_id\":\"[^\"]*\"' | sed 's/\"scan_id\":\"//;s/\"//'",
+                            returnStdout: true
+                        ).trim()
+
+                        if (!scanId) {
+                            error("Could not extract scan_id from response: ${response}")
+                        }
+
+                        env.SCAN_ID = scanId
+                        echo "Scan started — scan_id: ${env.SCAN_ID}"
+                    }
+                }
+            }
+        }
+
+        stage('Wait for Completion') {
+            /*
+             * Poll GET /scans/{scan_id} every POLL_INTERVAL_SECONDS seconds
+             * until the status field reaches a terminal value.
+             * Terminal statuses mirror the OpenVAS task states:
+             * Done, Stopped, Interrupted.
+             */
+            steps {
+                withCredentials([string(
+                    credentialsId: 'OV1_API_TOKEN',
+                    variable: 'API_TOKEN'
+                )]) {
+                    script {
+                        def terminalStatuses = ['Done', 'Stopped', 'Interrupted']
+                        def elapsed = 0
+                        def timeout  = env.SCAN_TIMEOUT_SECONDS.toInteger()
+                        def interval = env.POLL_INTERVAL_SECONDS.toInteger()
+                        def status   = ''
+                        def progress = ''
+
+                        while (elapsed < timeout) {
+                            def response = sh(
+                                script: """
+                                    curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID} \\
+                                        -H 'Authorization: Bearer ${API_TOKEN}'
+                                """,
+                                returnStdout: true
+                            ).trim()
+
+                            status = sh(
+                                script: "echo '${response}' | grep -o '\"status\":\"[^\"]*\"' | head -1 | sed 's/\"status\":\"//;s/\"//'",
+                                returnStdout: true
+                            ).trim()
+
+                            progress = sh(
+                                script: "echo '${response}' | grep -o '\"progress\":[0-9]*' | sed 's/\"progress\"://'",
+                                returnStdout: true
+                            ).trim()
+
+                            echo "scan_id=${env.SCAN_ID} | status=${status} | progress=${progress}% | elapsed=${elapsed}s"
+
+                            if (terminalStatuses.contains(status)) {
+                                echo "Scan reached terminal status: ${status}"
+                                env.FINAL_STATUS = status
+                                break
+                            }
+
+                            sleep(interval)
+                            elapsed += interval
+                        }
+
+                        if (!terminalStatuses.contains(status)) {
+                            error("Scan timed out after ${timeout}s — last status: ${status}")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Fetch Results') {
+            /*
+             * GET /scans/{scan_id}/results returns the MrBenny push state:
+             * whether the event was delivered and which mrbenny_device_ids
+             * were assigned to the scanned host.
+             */
+            steps {
+                withCredentials([string(
+                    credentialsId: 'OV1_API_TOKEN',
+                    variable: 'API_TOKEN'
+                )]) {
+                    script {
+                        def results = sh(
+                            script: """
+                                curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID}/results \\
+                                    -H 'Authorization: Bearer ${API_TOKEN}'
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "=== Scan Results ==="
+                        echo results
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Scan ${env.SCAN_ID} completed (${env.FINAL_STATUS}) and results pushed to MrBenny."
+        }
+        failure {
+            echo "Scan job failed. Check the console output above for details."
+        }
+        always {
+            deleteDir()
+        }
+    }
+}
