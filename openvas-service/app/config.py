@@ -43,6 +43,10 @@ class Settings:
         # completed scans and pushes results to MrBenny
         self.poll_interval_seconds = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 
+        # Google Drive integration — used to share normalized scan payloads
+        self.google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        self.google_drive_folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+
     def validate(self) -> None:
         """
         Validate required settings at startup.
@@ -78,6 +82,11 @@ class Settings:
             logger.warning(
                 "Neither MRBENNY_INSTALL_TOKEN nor MRBENNY_API_KEY is set — "
                 "MrBenny requests will fail"
+            )
+        if not self.google_drive_folder_id:
+            logger.warning(
+                "GOOGLE_DRIVE_FOLDER_ID is not set — scan payloads will NOT be "
+                "uploaded to Google Drive for MI agent pickup"
             )
 
 
