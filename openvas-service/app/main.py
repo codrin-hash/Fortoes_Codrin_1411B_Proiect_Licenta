@@ -48,6 +48,7 @@ from app.clients.openvas_client import OpenVASClient
 from app.clients import mr_benny_client
 from app.core import result_mapper
 from app import session_manager
+from app.clients import google_drive_client
 
 logger = logging.getLogger(__name__)
 
@@ -373,3 +374,35 @@ def get_journal():
             for e in entries
         ],
     }
+
+
+@app.post("/scans/{scan_id}/upload_drive", dependencies=[Depends(require_token)])
+def upload_scan_to_drive(scan_id: str):
+    '''
+    Upload the normalized MrBenny ingest payload for a finished scan to the
+    shared Google Drive folder. This endpoint is called by the Jenkinsfile-scan
+    pipeline after MrBenny delivery and provides the data exchange artefact
+    consumed by the MI agent (Gabriel). Returns the Drive file_id on success,
+    or null when the Drive integration is not configured or the scan has not
+    yet been pushed to MrBenny.
+    '''
+    record = get_scan_record(scan_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    if not record.mrbenny_pushed:
+        return {"drive_file_id": None, "skipped": True, "reason": "scan not yet pushed to MrBenny"}
+
+    # Reconstruct the payload structure that was sent to MrBenny
+    payload = {
+        "scan_id": record.scan_id,
+        "asset_id": record.asset_id,
+        "hostname": record.hostname,
+        "ip_address": record.ip_address,
+        "status": record.status,
+        "report_id": record.report_id,
+        "mrbenny_device_ids": record.mrbenny_device_ids,
+    }
+
+    file_id = google_drive_client.upload_scan_payload(scan_id=scan_id, payload=payload)
+    return {"drive_file_id": file_id, "skipped": file_id is None}
