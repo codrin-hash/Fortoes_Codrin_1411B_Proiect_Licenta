@@ -44,10 +44,6 @@ pipeline {
 
     environment {
         OV1_BASE_URL = 'http://ov1-service:8081'
-        /*
-         * Maximum time (seconds) to wait for a scan to finish before the
-         * job is aborted. Full OpenVAS scans can take tens of minutes.
-         */
         SCAN_TIMEOUT_SECONDS = '3600'
         POLL_INTERVAL_SECONDS = '30'
     }
@@ -190,10 +186,51 @@ pipeline {
         }
 
         stage('Fetch Results') {
+            steps {
+                withCredentials([string(
+                    credentialsId: 'OV1_API_TOKEN',
+                    variable: 'API_TOKEN'
+                )]) {
+                    script {
+                        def pushed = false
+                        def attempts = 0
+                        while (!pushed && attempts < 20) {
+                            def results = sh(
+                                script: """
+                                    curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID}/results \\
+                                        -H "Authorization: Bearer ${API_TOKEN}"
+                                """,
+                                returnStdout: true
+                            ).trim()
+
+                            echo "Results: ${results}"
+
+                            pushed = results.contains('"mrbenny_pushed":true')
+                            if (!pushed) {
+                                echo "MrBenny push not complete yet, waiting 30s..."
+                                sleep(30)
+                            }
+                            attempts++
+                        }
+
+                        if (!pushed) {
+                            error("MrBenny push did not complete after ${attempts} attempts")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Upload to Drive') {
             /*
-             * GET /scans/{scan_id}/results returns the MrBenny push state:
-             * whether the event was delivered and which mrbenny_device_ids
-             * were assigned to the scanned host.
+             * Trigger the OV1 service to upload the normalized scan payload to
+             * the shared Google Drive folder. The MI agent polls that
+             * folder to pick up new vulnerability data.
+             *
+             * This stage is advisory: a Drive upload failure does not abort the
+             * pipeline because the scan result is already stored in MrBenny.
+             * The upload endpoint returns 200 with drive_file_id=null when
+             * GOOGLE_DRIVE_FOLDER_ID is not configured — safe to call regardless.
              */
             steps {
                 withCredentials([string(
@@ -201,16 +238,15 @@ pipeline {
                     variable: 'API_TOKEN'
                 )]) {
                     script {
-                        def results = sh(
+                        def driveResponse = sh(
                             script: """
-                                curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID}/results \\
-                                    -H "Authorization: Bearer ${API_TOKEN}"
+                                curl -sf -X POST ${OV1_BASE_URL}/scans/${env.SCAN_ID}/upload_drive \\
+                                    -H "Authorization: Bearer ${API_TOKEN}" || echo '{"drive_file_id":null,"skipped":true}'
                             """,
                             returnStdout: true
                         ).trim()
 
-                        echo "=== Scan Results ==="
-                        echo results
+                        echo "Drive upload response: ${driveResponse}"
                     }
                 }
             }

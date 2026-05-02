@@ -31,7 +31,7 @@ from fastapi import FastAPI, Depends, HTTPException
 
 from app.config import settings
 from app.security import require_token
-from app.models import (
+from app.models.models import (
     ScanRequest,
     ScanCreateResponse,
     ScanStatusResponse,
@@ -46,6 +46,7 @@ from app.core.storage import (
 )
 from app.clients.openvas_client import OpenVASClient
 from app.clients import mr_benny_client
+from app.clients import google_drive_client
 from app.core import result_mapper
 from app import session_manager
 
@@ -347,29 +348,55 @@ def get_scan_results(scan_id: str):
     }
 
 
-@app.get("/journal", dependencies=[Depends(require_token)])
-def get_journal():
-    """
-    Return all local journal entries.
+@app.post("/scans/{scan_id}/upload_drive", dependencies=[Depends(require_token)])
+def upload_scan_to_drive(scan_id: str):
+    '''
+    Download the OpenVAS report for a finished scan, build the normalized
+    vulnerability payload (CVE-only findings), and upload it to Google Drive.
 
-    Useful for debugging delivery state: which events were sent,
-    which are pending retry, which failed permanently.
-    """
-    entries = journal.get_all_entries()
-    return {
-        "total": len(entries),
-        "entries": [
-            {
-                "journal_id": e.journal_id,
-                "client_event_id": e.client_event_id,
-                "scan_id": e.scan_id,
-                "status": e.status,
-                "created_at": e.created_at,
-                "sent_at": e.sent_at,
-                "server_event_id": e.server_event_id,
-                "attempt_count": e.attempt_count,
-                "last_error": e.last_error,
-            }
-            for e in entries
-        ],
-    }
+    The uploaded JSON follows the OV1-MI data contract (schema_version 1.0)
+    and is intended for consumption by the MI agent (Gabriel) for MISP ingestion.
+    This endpoint is called by Jenkinsfile-scan after MrBenny delivery.
+
+    Returns drive_file_id on success, or null when Drive is not configured
+    or the scan has not yet been pushed to MrBenny.
+    '''
+    record = get_scan_record(scan_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    if not record.mrbenny_pushed:
+        return {
+            "drive_file_id": None,
+            "skipped": True,
+            "reason": "scan not yet pushed to MrBenny",
+        }
+
+    if record.report_id is None:
+        return {
+            "drive_file_id": None,
+            "skipped": True,
+            "reason": "report_id not available",
+        }
+
+    try:
+        report_xml = openvas.get_report(record.report_id)
+    except Exception as exc:
+        logger.error(
+            "upload_drive: failed to fetch report for scan %s: %s", scan_id, exc
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Could not fetch OpenVAS report: {exc}"
+        )
+
+    file_id = google_drive_client.upload_scan_payload(
+        scan_id=record.scan_id,
+        asset_id=record.asset_id,
+        hostname=record.hostname,
+        ip_address=record.ip_address,
+        report_id=record.report_id,
+        mrbenny_device_ids=record.mrbenny_device_ids,
+        report_xml=report_xml,
+    )
+
+    return {"drive_file_id": file_id, "skipped": file_id is None}
