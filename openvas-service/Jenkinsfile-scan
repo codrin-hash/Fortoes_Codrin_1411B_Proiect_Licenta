@@ -186,27 +186,36 @@ pipeline {
         }
 
         stage('Fetch Results') {
-            /*
-             * GET /scans/{scan_id}/results returns the MrBenny push state:
-             * whether the event was delivered and which mrbenny_device_ids
-             * were assigned to the scanned host.
-             */
             steps {
                 withCredentials([string(
                     credentialsId: 'OV1_API_TOKEN',
                     variable: 'API_TOKEN'
                 )]) {
                     script {
-                        def results = sh(
-                            script: """
-                                curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID}/results \\
-                                    -H "Authorization: Bearer ${API_TOKEN}"
-                            """,
-                            returnStdout: true
-                        ).trim()
+                        def pushed = false
+                        def attempts = 0
+                        while (!pushed && attempts < 20) {
+                            def results = sh(
+                                script: """
+                                    curl -sf ${OV1_BASE_URL}/scans/${env.SCAN_ID}/results \\
+                                        -H "Authorization: Bearer ${API_TOKEN}"
+                                """,
+                                returnStdout: true
+                            ).trim()
 
-                        echo "=== Scan Results ==="
-                        echo results
+                            echo "Results: ${results}"
+
+                            pushed = results.contains('"mrbenny_pushed":true')
+                            if (!pushed) {
+                                echo "MrBenny push not complete yet, waiting 30s..."
+                                sleep(30)
+                            }
+                            attempts++
+                        }
+
+                        if (!pushed) {
+                            error("MrBenny push did not complete after ${attempts} attempts")
+                        }
                     }
                 }
             }
