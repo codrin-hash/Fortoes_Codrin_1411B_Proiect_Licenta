@@ -21,7 +21,7 @@ curl http://localhost:8081/health
 ## Gaseste IP-ul Metasploitable2
 
 ```bash
-docker inspect metasploitable2 | grep IPAddress
+docker inspect metasploitable | grep IPAddress
 ```
 
 ## Porneste o scanare (din Jenkins)
