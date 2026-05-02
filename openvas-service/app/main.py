@@ -31,7 +31,7 @@ from fastapi import FastAPI, Depends, HTTPException
 
 from app.config import settings
 from app.security import require_token
-from app.models import (
+from app.models.models import (
     ScanRequest,
     ScanCreateResponse,
     ScanStatusResponse,

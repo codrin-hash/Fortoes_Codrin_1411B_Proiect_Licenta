@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+from app.core import journal
 from app import session_manager
 from app.config import settings
 from app.models.mr_benny_models import (
