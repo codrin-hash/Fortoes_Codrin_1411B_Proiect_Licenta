@@ -24,6 +24,7 @@ curl http://localhost:8081/health
 docker inspect metasploitable | grep IPAddress
 ```
 
+
 ## Porneste o scanare (din Jenkins)
 
 `http://localhost:8080` → **ov1-scan** → **Build with Parameters**
