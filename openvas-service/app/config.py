@@ -44,7 +44,9 @@ class Settings:
         self.poll_interval_seconds = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 
         # Google Drive integration — used to share normalized scan payloads
-        self.google_service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        # with the MI agent (Gabriel). The OAuth token is generated once via
+        # generate_token.py and mounted into the container at this path.
+        self.google_token_json = os.getenv("GOOGLE_TOKEN_JSON", "")
         self.google_drive_folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
 
     def validate(self) -> None:

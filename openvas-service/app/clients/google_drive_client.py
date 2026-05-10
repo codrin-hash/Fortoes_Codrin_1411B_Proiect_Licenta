@@ -1,9 +1,8 @@
 '''
 Uploads normalized vulnerability detection payloads to a shared Google Drive
 folder, acting as an intermediate data exchange layer between OV1 and the MI
-agent operated by Gabriel. Authentication relies on a service account, whose
-credentials are supplied via the GOOGLE_SERVICE_ACCOUNT_JSON environment
-variable (path to the JSON key file).
+agent operated by Gabriel. Authentication uses an OAuth 2.0 token generated
+once via the generate_token.py script and stored at GOOGLE_TOKEN_JSON.
 '''
 
 import json
@@ -13,9 +12,9 @@ from collections import Counter
 from datetime import datetime, timezone
 from io import BytesIO
 from typing import Optional
-from xml.etree.ElementTree import Element
 
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
@@ -29,21 +28,27 @@ _SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 def _get_service():
     '''
     Build and return an authenticated Google Drive API service client.
-    Credentials are loaded from the path stored in GOOGLE_SERVICE_ACCOUNT_JSON.
+    Loads the OAuth token from GOOGLE_TOKEN_JSON and refreshes it if expired.
     '''
-    key_path = settings.google_service_account_json
-    if not key_path or not os.path.isfile(key_path):
+    token_path = settings.google_token_json
+    if not token_path or not os.path.isfile(token_path):
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON is not set or the file does not exist"
+            "GOOGLE_TOKEN_JSON is not set or the file does not exist"
         )
-    creds = service_account.Credentials.from_service_account_file(
-        key_path, scopes=_SCOPES
-    )
+
+    creds = Credentials.from_authorized_user_file(token_path, _SCOPES)
+
+    # Refresh the token automatically if it has expired
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open(token_path, "w") as f:
+            f.write(creds.to_json())
+
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def _text(element: Optional[Element], path: str) -> Optional[str]:
-    '''Return stripped text of an XML sub-element, or None if absent.'''
+def _text(element, path: str) -> Optional[str]:
+    '''Return stripped text of an lxml sub-element, or None if absent.'''
     if element is None:
         return None
     node = element.find(path)
@@ -72,7 +77,7 @@ def build_drive_payload(
     ip_address: str,
     report_id: Optional[str],
     mrbenny_device_ids: dict,
-    report_xml: Optional[Element],
+    report_xml,
 ) -> dict:
     '''
     Construct the full normalized payload to be written to Google Drive.
@@ -91,7 +96,8 @@ def build_drive_payload(
 
     if report_xml is not None:
         report = report_xml
-        if report.tag == "get_reports_response":
+        tag = report.tag.split("}")[-1] if "}" in str(report.tag) else str(report.tag)
+        if tag == "get_reports_response":
             report = report.find("report")
         if report is not None and report.find("report") is not None:
             report = report.find("report")
@@ -111,7 +117,7 @@ def build_drive_payload(
                             host_info["os"] = value
                     break
 
-            # Extract findings with at least one CVE reference
+            # Extract findings that carry at least one CVE reference
             for result in report.findall("results/result"):
                 if _text(result, "host") != ip_address:
                     continue
@@ -175,7 +181,7 @@ def upload_scan_payload(
     ip_address: str,
     report_id: Optional[str],
     mrbenny_device_ids: dict,
-    report_xml: Optional[Element],
+    report_xml,
 ) -> Optional[str]:
     '''
     Build the normalized payload and upload it to the configured Drive folder.
