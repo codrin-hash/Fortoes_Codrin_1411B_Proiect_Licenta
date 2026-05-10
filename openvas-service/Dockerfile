@@ -10,3 +10,5 @@ RUN mkdir -p /run/secrets
 COPY token.json /run/secrets/token.json
 
 ENV PYTHONUNBUFFERED=1
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8081"]
