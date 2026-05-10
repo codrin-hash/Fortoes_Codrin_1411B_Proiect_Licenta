@@ -12,7 +12,6 @@ services:
     restart: unless-stopped
     volumes:
       - greenbone-community-edition_gvmd_socket_vol:/run/gvmd
-      - ./token.json:/run/secrets/token.json:ro
 
   jenkins:
     image: jenkins/jenkins:lts-jdk17
