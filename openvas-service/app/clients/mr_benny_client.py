@@ -10,12 +10,10 @@ Responsibilities:
     - Extract and return the id_map (identifier -> mrbenny_device_id)
     - Integrate with the local journal for at-least-once delivery
 
-Mode A authentication headers (per student_documentation.md section 2.2):
+Mode A authentication headers:
     X-Mrbenny-Mode: A
     X-API-Key: <api_key>
 
-References:
-    - student_documentation.md, sections 2.2, 5.5, 6, 7
 """
 
 import logging

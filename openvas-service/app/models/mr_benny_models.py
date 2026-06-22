@@ -7,10 +7,6 @@ communicating with the MrBenny platform API (v1).
 OV1 acts as an ingest agent: it sends vulnerability detection
 observations to MrBenny via POST /api/v1/ingest/data, using
 the Mode A authentication (static API key).
-
-References:
-    - student_documentation.md, sections 5.5, 7, 8
-    - ov1_ingest_vulnerability_detection.json
 """
 
 from typing import Any, Optional
@@ -33,7 +29,7 @@ class MrBennyFinding(BaseModel):
     """
     A single vulnerability finding attached to an observation.
 
-    Follows the structure from ov1_ingest_vulnerability_detection.json:
+    Following a structure
         finding_type : always "vulnerability" for OV1
         code         : CVE ID if available, otherwise NVT OID
         severity     : severity class string — "critical", "high", "medium", "low", "log"
@@ -77,7 +73,7 @@ class MrBennySourceContext(BaseModel):
     """
     Metadata about the OpenVAS scan that produced this event.
 
-    Follows the structure from ov1_ingest_vulnerability_detection.json:
+    Following the structure
         scan_id : internal OV1 scan identifier
         scanner : scanner name, always "openvas-main" for OV1
     """

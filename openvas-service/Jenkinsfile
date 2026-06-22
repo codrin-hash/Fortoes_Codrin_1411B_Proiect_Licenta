@@ -1,7 +1,6 @@
 /*
  * CI pipeline for the OV1 OpenVAS integration service.
  *
- * Triggered automatically on every commit via a GitHub webhook.
  * Runs the full unit test suite inside a python:3.12-slim container —
  * no live OpenVAS socket or MrBenny instance is required.
  */

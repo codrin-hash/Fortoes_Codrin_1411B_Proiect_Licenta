@@ -13,9 +13,6 @@ with 401/403, the client should call open_session() again to renew it.
 
 If MRBENNY_INSTALL_TOKEN is not configured, the manager stays inactive
 and mr_benny_client falls back to Mode A.
-
-References:
-    - student_documentation.md, sections 2.3, 5.4
 """
 
 import logging

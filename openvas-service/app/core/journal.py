@@ -22,8 +22,6 @@ Journal entry lifecycle:
     pending  →  failed    (non-retryable error from MrBenny)
     pending  →  pending   (retryable error — will be retried)
 
-References:
-    - student_documentation.md, sections 7, 12
 """
 
 import logging

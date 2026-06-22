@@ -355,7 +355,7 @@ def upload_scan_to_drive(scan_id: str):
     vulnerability payload (CVE-only findings), and upload it to Google Drive.
 
     The uploaded JSON follows the OV1-MI data contract (schema_version 1.0)
-    and is intended for consumption by the MI agent (Gabriel) for MISP ingestion.
+    and is intended for consumption by the MI agent for MISP ingestion.
     This endpoint is called by Jenkinsfile-scan after MrBenny delivery.
 
     Returns drive_file_id on success, or null when Drive is not configured
